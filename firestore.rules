@@ -1,0 +1,206 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Shared hardened primitives
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+    }
+
+    // Entity validators (no existing() or diff() inside helpers)
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'displayName', 'photoURL', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'photoURL', 'createdAt', 'updatedAt'])
+        && data.uid is string && data.uid == userId && isValidId(data.uid)
+        && data.displayName is string && data.displayName.size() <= 100
+        && data.photoURL is string && data.photoURL.size() <= 500
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserPrivateInfo(data, userId) {
+      return data.keys().hasAll(['ownerId', 'email', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'email', 'updatedAt'])
+        && data.ownerId is string && data.ownerId == userId && isValidId(data.ownerId)
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 254
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidGameProfile(data, userId) {
+      return data.keys().hasAll(['ownerId', 'name', 'platform', 'genre', 'notes', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'name', 'platform', 'genre', 'notes', 'createdAt', 'updatedAt'])
+        && data.ownerId is string && data.ownerId == userId && isValidId(data.ownerId)
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 80
+        && data.platform is string && data.platform in ['pc', 'mobile', 'console', 'studio']
+        && data.genre is string && data.genre.size() >= 1 && data.genre.size() <= 60
+        && data.notes is string && data.notes.size() <= 500
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidChatSession(data, userId) {
+      return data.keys().hasAll(['ownerId', 'title', 'profileId', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'title', 'profileId', 'createdAt', 'updatedAt'])
+        && data.ownerId is string && data.ownerId == userId && isValidId(data.ownerId)
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 120
+        && data.profileId is string && data.profileId.size() <= 128
+        && (data.profileId == '' || isValidId(data.profileId))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidChatMessage(data, userId, sessionId) {
+      return data.keys().hasAll(['ownerId', 'sessionId', 'role', 'text', 'channel', 'modelUsed', 'createdAt'])
+        && data.keys().hasOnly(['ownerId', 'sessionId', 'role', 'text', 'channel', 'modelUsed', 'createdAt'])
+        && data.ownerId is string && data.ownerId == userId && isValidId(data.ownerId)
+        && data.sessionId is string && data.sessionId == sessionId && isValidId(data.sessionId)
+        && data.role is string && data.role in ['user', 'assistant']
+        && data.text is string && data.text.size() >= 1 && data.text.size() <= 16000
+        && data.channel is string && data.channel in ['text', 'voice', 'transcribe', 'autocoach']
+        && data.modelUsed is string && data.modelUsed.size() <= 80
+        && data.createdAt is timestamp;
+    }
+
+    function isValidVoiceTranscript(data, userId) {
+      return data.keys().hasAll(['ownerId', 'profileId', 'transcriptText', 'durationMs', 'createdAt'])
+        && data.keys().hasOnly(['ownerId', 'profileId', 'transcriptText', 'durationMs', 'createdAt'])
+        && data.ownerId is string && data.ownerId == userId && isValidId(data.ownerId)
+        && data.profileId is string && data.profileId.size() <= 128
+        && (data.profileId == '' || isValidId(data.profileId))
+        && data.transcriptText is string && data.transcriptText.size() >= 1 && data.transcriptText.size() <= 4000
+        && data.durationMs is number && data.durationMs >= 0 && data.durationMs <= 3600000
+        && data.createdAt is timestamp;
+    }
+
+    // User root document (non-PII)
+    match /users/{userId} {
+      allow get: if isOwner(userId) && existing().uid == request.auth.uid;
+      allow list: if false;
+      allow create: if isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'updatedAt']);
+      allow delete: if false;
+
+      // Isolated private PII subcollection
+      match /private/{docId} {
+        allow get: if isOwner(userId) && docId == 'info' && existing().ownerId == request.auth.uid;
+        allow list: if false;
+        allow create: if isOwner(userId)
+          && docId == 'info'
+          && isValidUserPrivateInfo(incoming(), userId)
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId));
+        allow update: if isOwner(userId)
+          && docId == 'info'
+          && isValidUserPrivateInfo(incoming(), userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'updatedAt']);
+        allow delete: if false;
+      }
+
+      // User-owned Game Profiles
+      match /profiles/{profileId} {
+        allow get: if isOwner(userId) && isValidId(profileId) && existing().ownerId == request.auth.uid;
+        allow list: if isSignedIn() && request.auth.uid == userId && resource.data.ownerId == request.auth.uid;
+        allow create: if isOwner(userId)
+          && isValidId(profileId)
+          && isValidGameProfile(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId));
+        allow update: if isOwner(userId)
+          && isValidId(profileId)
+          && isValidGameProfile(incoming(), userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'platform', 'genre', 'notes', 'updatedAt']);
+        allow delete: if isOwner(userId) && isValidId(profileId) && existing().ownerId == request.auth.uid;
+      }
+
+      // User-owned Chat Sessions
+      match /sessions/{sessionId} {
+        allow get: if isOwner(userId) && isValidId(sessionId) && existing().ownerId == request.auth.uid;
+        allow list: if isSignedIn() && request.auth.uid == userId && resource.data.ownerId == request.auth.uid;
+        allow create: if isOwner(userId)
+          && isValidId(sessionId)
+          && isValidChatSession(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId));
+        allow update: if isOwner(userId)
+          && isValidId(sessionId)
+          && isValidChatSession(incoming(), userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'profileId', 'updatedAt']);
+        allow delete: if isOwner(userId) && isValidId(sessionId) && existing().ownerId == request.auth.uid;
+
+        // Messages subcollection gated by parent ChatSession ownership
+        match /messages/{messageId} {
+          allow get: if isOwner(userId)
+            && isValidId(sessionId)
+            && isValidId(messageId)
+            && existing().ownerId == request.auth.uid
+            && get(/databases/$(database)/documents/users/$(userId)/sessions/$(sessionId)).data.ownerId == request.auth.uid;
+          allow list: if isSignedIn() && request.auth.uid == userId && resource.data.ownerId == request.auth.uid;
+          allow create: if isOwner(userId)
+            && isValidId(sessionId)
+            && isValidId(messageId)
+            && isValidChatMessage(incoming(), userId, sessionId)
+            && incoming().createdAt == request.time
+            && exists(/databases/$(database)/documents/users/$(userId)/sessions/$(sessionId))
+            && get(/databases/$(database)/documents/users/$(userId)/sessions/$(sessionId)).data.ownerId == request.auth.uid;
+          allow update: if false;
+          allow delete: if isOwner(userId)
+            && isValidId(sessionId)
+            && isValidId(messageId)
+            && existing().ownerId == request.auth.uid;
+        }
+      }
+
+      // User-owned Voice Transcripts
+      match /transcripts/{transcriptId} {
+        allow get: if isOwner(userId) && isValidId(transcriptId) && existing().ownerId == request.auth.uid;
+        allow list: if isSignedIn() && request.auth.uid == userId && resource.data.ownerId == request.auth.uid;
+        allow create: if isOwner(userId)
+          && isValidId(transcriptId)
+          && isValidVoiceTranscript(incoming(), userId)
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId));
+        allow update: if false;
+        allow delete: if isOwner(userId) && isValidId(transcriptId) && existing().ownerId == request.auth.uid;
+      }
+    }
+  }
+}

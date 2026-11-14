@@ -1,0 +1,10 @@
+{
+  "name": "RbxSight — Asisten Layar Roblox",
+  "description": "Bagikan layar Roblox atau Roblox Studio untuk bantuan real-time melalui suara langsung dan analisis visual AI untuk scripting Luau, debugging, building, dan gameplay.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
